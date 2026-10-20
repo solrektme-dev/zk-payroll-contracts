@@ -164,8 +164,8 @@ pub struct PayoutMethodConfirmation {
 /// Versioned admin configuration tracking for reliable change detection.
 ///
 /// This structure tracks the current configuration version for a company's
-/// admin settings (admin address, treasury address, and other admin-gated
-/// configuration). Each time admin or treasury changes, the version increments,
+/// admin settings (admin address, treasury address, and revocation status).
+/// Each time admin, treasury, or revocation changes, the version increments,
 /// allowing off-chain clients to reliably detect when configuration has changed
 /// without polling individual fields.
 #[contracttype]
@@ -173,7 +173,7 @@ pub struct PayoutMethodConfirmation {
 pub struct AdminConfigVersion {
     /// Monotonically increasing version number for admin configuration changes.
     /// Starts at 1 when a company is registered and increments with each
-    /// admin or treasury rotation.
+    /// admin, treasury, or revocation change.
     pub version: u64,
     /// Timestamp when this version was set.
     pub updated_at: u64,
@@ -486,6 +486,33 @@ impl PayrollRegistry {
         }
     }
 
+    /// Bump the per-company admin configuration revision and publish an
+    /// event. Tracks company-level configuration changes (admin rotation,
+    /// treasury rotation, and revocation) so off-chain clients can detect
+    /// when a company's configuration has changed without polling
+    /// individual fields. Issue #645.
+    fn bump_admin_config_version(env: &Env, company_id: u64, updated_by: Address) {
+        let current_version: AdminConfigVersion = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AdminConfigVersion(company_id))
+            .expect("Admin config version not found");
+        let updated_version = AdminConfigVersion {
+            version: current_version.version + 1,
+            updated_at: env.ledger().sequence() as u64,
+            updated_by: updated_by.clone(),
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::AdminConfigVersion(company_id), &updated_version);
+        payroll_events::emit_registry_admin_config_version_updated(
+            env,
+            company_id,
+            updated_version.version,
+            updated_by,
+        );
+    }
+
     /// Validates an employer display-name/reference-id style metadata value
     /// (issue #378): non-empty and within a reasonable length bound.
     /// `CompanyInfo` does not yet store employer metadata fields, so this is
@@ -727,7 +754,10 @@ impl PayrollRegistryTrait for PayrollRegistry {
             .persistent()
             .remove(&DataKey::CompanyAdmin(admin.clone()));
 
-        payroll_events::emit_company_admin_revoked(&env, company_id, admin);
+        payroll_events::emit_company_admin_revoked(&env, company_id, admin.clone());
+
+        // Revocation is a company configuration change: bump the revision (issue #645).
+        Self::bump_admin_config_version(&env, company_id, admin);
     }
 
     fn add_employee(env: Env, company_id: u64, employee: Address, commitment: BytesN<32>) {
@@ -1085,26 +1115,8 @@ impl PayrollRegistryTrait for PayrollRegistry {
             .set(&DataKey::CompanyAdmin(new_admin.clone()), &company_id);
         payroll_events::emit_company_admin_rotated(&env, company_id, old_admin, new_admin.clone());
 
-        // Increment admin config version
-        let current_version: AdminConfigVersion = env
-            .storage()
-            .persistent()
-            .get(&DataKey::AdminConfigVersion(company_id))
-            .expect("Admin config version not found");
-        let updated_version = AdminConfigVersion {
-            version: current_version.version + 1,
-            updated_at: env.ledger().sequence() as u64,
-            updated_by: new_admin.clone(),
-        };
-        env.storage()
-            .persistent()
-            .set(&DataKey::AdminConfigVersion(company_id), &updated_version);
-        payroll_events::emit_registry_admin_config_version_updated(
-            &env,
-            company_id,
-            updated_version.version,
-            new_admin,
-        );
+        // Increment admin config version (issue #645: company config revision tracking).
+        Self::bump_admin_config_version(&env, company_id, new_admin);
     }
 
     fn cancel_admin_rotation(env: Env, company_id: u64, current_admin: Address) {
@@ -1220,26 +1232,8 @@ impl PayrollRegistryTrait for PayrollRegistry {
             (old_treasury, new_treasury.clone()),
         );
 
-        // Increment admin config version
-        let current_version: AdminConfigVersion = env
-            .storage()
-            .persistent()
-            .get(&DataKey::AdminConfigVersion(company_id))
-            .expect("Admin config version not found");
-        let updated_version = AdminConfigVersion {
-            version: current_version.version + 1,
-            updated_at: env.ledger().sequence() as u64,
-            updated_by: new_treasury.clone(),
-        };
-        env.storage()
-            .persistent()
-            .set(&DataKey::AdminConfigVersion(company_id), &updated_version);
-        payroll_events::emit_registry_admin_config_version_updated(
-            &env,
-            company_id,
-            updated_version.version,
-            new_treasury,
-        );
+        // Increment admin config version (issue #645: company config revision tracking).
+        Self::bump_admin_config_version(&env, company_id, new_treasury);
     }
 
     fn cancel_treasury_rotation(env: Env, company_id: u64, current_admin: Address) {
