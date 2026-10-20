@@ -9,6 +9,7 @@ ptau/
 build/circuits/
 
 # snarkjs intermediate zkeys
+temp_auto_push.bat
 *.zkey
 
 # Circom compiled output (reproducible from source)
@@ -20,3 +21,5 @@ build/circuits/
 .env
 .env.*
 .opencode
+.gitignore
+branch_structure.json
